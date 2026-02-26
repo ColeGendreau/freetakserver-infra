@@ -1,0 +1,38 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - curl
+  - wget
+  - git
+  - ufw
+
+write_files:
+  - path: /opt/install-fts.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      exec > /var/log/fts-install.log 2>&1
+
+      echo "=== FreeTAKServer Installation Started ==="
+      echo "Timestamp: $(date -u)"
+
+      PUBLIC_IP="${fts_public_ip}"
+      if [ -z "$PUBLIC_IP" ]; then
+        PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s http://ifconfig.me)
+      fi
+      echo "Using public IP: $PUBLIC_IP"
+
+      # Run the FreeTAKServer Zero Touch Installer
+      # The ZTI handles Python 3.11, FTS, FTS-UI, Video Server,
+      # Node-RED integration server, Mumble voice, and WebMap
+      wget -qO - bit.ly/freetakhub2 | sudo bash -s -- --ip-addr "$PUBLIC_IP"
+
+      echo "=== FreeTAKServer Installation Complete ==="
+      echo "Timestamp: $(date -u)"
+
+runcmd:
+  - bash /opt/install-fts.sh
