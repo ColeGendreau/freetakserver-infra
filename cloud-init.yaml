@@ -7,18 +7,23 @@ packages:
   - curl
   - wget
   - git
-  - ufw
-  - zip
+
+users:
+  - default
+  - name: tak
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: sudo
 
 write_files:
-  - path: /opt/install-fts.sh
+  - path: /opt/install-ots.sh
     permissions: "0755"
     content: |
       #!/bin/bash
       set -euo pipefail
-      exec > /var/log/fts-install.log 2>&1
+      exec > /var/log/ots-install.log 2>&1
 
-      echo "=== FreeTAKServer Installation Started ==="
+      echo "=== OpenTAKServer Installation Started ==="
       echo "Timestamp: $(date -u)"
 
       PUBLIC_IP="${fts_public_ip}"
@@ -27,82 +32,16 @@ write_files:
       fi
       echo "Using public IP: $PUBLIC_IP"
 
-      # Run the FreeTAKServer Zero Touch Installer
-      wget -qO - bit.ly/freetakhub2 | sudo bash -s -- --ip-addr "$PUBLIC_IP"
+      # OTS installer must NOT run as root
+      su - tak -c 'curl https://i.opentakserver.io/ubuntu_installer -L | bash - 2>&1' | tee -a /var/log/ots-install.log
 
-      echo "=== FreeTAKServer Installation Complete ==="
+      echo "=== OpenTAKServer Installation Complete ==="
       echo "Timestamp: $(date -u)"
-
-      # Generate iTAK/ATAK client data package with SSL certs
-      echo "=== Generating Client Data Package ==="
-      bash /opt/generate-datapackage.sh "$PUBLIC_IP"
-
-      echo "=== All Done ==="
-      echo "Timestamp: $(date -u)"
-
-  - path: /opt/generate-datapackage.sh
-    permissions: "0755"
-    content: |
-      #!/bin/bash
-      set -euo pipefail
-
-      PUBLIC_IP="$1"
-      CERT_DIR="/opt/fts/certs"
-      PKG_DIR="/opt/fts-datapackage"
-      PASS="atakatak"
-
-      rm -rf "$PKG_DIR"
-      mkdir -p "$PKG_DIR"
-
-      # Generate CA truststore as .p12 (required by iTAK)
-      openssl pkcs12 -export \
-        -nokeys \
-        -in "$CERT_DIR/ca.pem" \
-        -out "$PKG_DIR/caCert.p12" \
-        -passout "pass:$PASS" \
-        -certpbe PBE-SHA1-3DES \
-        -macalg sha1
-
-      # Generate client cert as .p12 with iOS-compatible encryption
-      openssl pkcs12 -export \
-        -in "$CERT_DIR/Client.pem" \
-        -inkey "$CERT_DIR/Client.key" \
-        -certfile "$CERT_DIR/ca.pem" \
-        -out "$PKG_DIR/clientCert.p12" \
-        -passout "pass:$PASS" \
-        -certpbe PBE-SHA1-3DES \
-        -keypbe PBE-SHA1-3DES \
-        -macalg sha1
-
-      # iTAK config.pref (flat at zip root, no MANIFEST needed)
-      cat > "$PKG_DIR/config.pref" << PREFEOF
-      <?xml version='1.0' standalone='yes'?>
-      <preferences>
-        <preference version="1" name="cot_streams">
-          <entry key="count" class="class java.lang.Integer">1</entry>
-          <entry key="description0" class="class java.lang.String">FreeTAKServer</entry>
-          <entry key="enabled0" class="class java.lang.Boolean">true</entry>
-          <entry key="connectString0" class="class java.lang.String">$PUBLIC_IP:8443:ssl</entry>
-        </preference>
-        <preference version="1" name="com.atakmap.app_preferences">
-          <entry key="displayServerConnectionWidget" class="class java.lang.Boolean">true</entry>
-          <entry key="caLocation" class="class java.lang.String">cert/caCert.p12</entry>
-          <entry key="caPassword" class="class java.lang.String">$PASS</entry>
-          <entry key="clientPassword" class="class java.lang.String">$PASS</entry>
-          <entry key="certificateLocation" class="class java.lang.String">cert/clientCert.p12</entry>
-        </preference>
-      </preferences>
-      PREFEOF
-
-      # Remove leading whitespace from the heredoc
-      sed -i 's/^      //' "$PKG_DIR/config.pref"
-
-      cd "$PKG_DIR"
-      zip FTS-iTAK.zip config.pref caCert.p12 clientCert.p12
-
-      echo "Data package ready at $PKG_DIR/FTS-iTAK.zip"
-      echo "Download with: scp root@$PUBLIC_IP:$PKG_DIR/FTS-iTAK.zip ."
-      echo "Certificate password: $PASS"
+      echo ""
+      echo "Web UI: https://$PUBLIC_IP"
+      echo "SSL CoT: $PUBLIC_IP:8089"
+      echo "Cert Enrollment: https://$PUBLIC_IP:8446"
+      echo "Truststore: https://$PUBLIC_IP/api/truststore"
 
 runcmd:
-  - bash /opt/install-fts.sh
+  - bash /opt/install-ots.sh

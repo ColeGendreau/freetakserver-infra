@@ -29,35 +29,47 @@ resource "digitalocean_firewall" "fts" {
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # FTS CoT SSL (FTS 2.x uses 8443)
+  # HTTPS (Web UI + certificate enrollment)
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "443"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  # OTS HTTPS TAK endpoint
   inbound_rule {
     protocol         = "tcp"
     port_range       = "8443"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # FTS REST API
+  # Certificate enrollment
   inbound_rule {
     protocol         = "tcp"
-    port_range       = "19023"
+    port_range       = "8446"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # FTS Web UI
+  # SSL CoT
   inbound_rule {
     protocol         = "tcp"
-    port_range       = "5000"
+    port_range       = "8089"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # Web Map
+  # Video streaming (RTSP)
   inbound_rule {
     protocol         = "tcp"
-    port_range       = "8000"
+    port_range       = "8554"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+  inbound_rule {
+    protocol         = "udp"
+    port_range       = "8554"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # Mumble voice server
+  # Mumble voice
   inbound_rule {
     protocol         = "tcp"
     port_range       = "64738"
@@ -66,20 +78,6 @@ resource "digitalocean_firewall" "fts" {
   inbound_rule {
     protocol         = "udp"
     port_range       = "64738"
-    source_addresses = ["0.0.0.0/0", "::/0"]
-  }
-
-  # Video server (RTSP)
-  inbound_rule {
-    protocol         = "tcp"
-    port_range       = "8554"
-    source_addresses = ["0.0.0.0/0", "::/0"]
-  }
-
-  # Node-RED
-  inbound_rule {
-    protocol         = "tcp"
-    port_range       = "1880"
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
@@ -111,7 +109,7 @@ resource "digitalocean_droplet" "fts" {
     fts_public_ip = var.fts_public_ip
   })
 
-  tags = ["freetakserver"]
+  tags = ["opentakserver"]
 
   lifecycle {
     create_before_destroy = true
