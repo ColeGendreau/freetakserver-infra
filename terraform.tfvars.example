@@ -4,9 +4,9 @@
 do_token            = "dop_v1_your_digitalocean_api_token_here"
 region              = "nyc1"
 droplet_size        = "s-1vcpu-2gb"
-droplet_name        = "freetakserver"
-ssh_key_name        = "fts-key"
-ssh_public_key_path = "~/.ssh/id_rsa.pub"
+droplet_name        = "opentakserver"
+ssh_key_name        = "ots-key"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
 
 # Leave empty to auto-detect from the droplet's public IP
-fts_public_ip = ""
+ots_public_ip = ""

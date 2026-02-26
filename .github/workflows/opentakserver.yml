@@ -1,4 +1,4 @@
-name: FreeTAKServer
+name: OpenTAKServer
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ env:
 
 jobs:
   terraform:
-    name: "${{ inputs.action }} FreeTAKServer"
+    name: "${{ inputs.action }} OpenTAKServer"
     runs-on: ubuntu-latest
 
     steps:
@@ -71,7 +71,7 @@ jobs:
       - name: Show Outputs
         if: inputs.action == 'deploy'
         run: |
-          echo "## FreeTAKServer Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "## OpenTAKServer Deployed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           terraform output >> $GITHUB_STEP_SUMMARY

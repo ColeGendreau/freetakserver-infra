@@ -19,13 +19,13 @@ variable "droplet_size" {
 variable "droplet_name" {
   description = "Name for the droplet"
   type        = string
-  default     = "freetakserver"
+  default     = "opentakserver"
 }
 
 variable "ssh_key_name" {
   description = "Name for the SSH key in DigitalOcean"
   type        = string
-  default     = "fts-key"
+  default     = "ots-key"
 }
 
 variable "ssh_public_key" {
@@ -40,8 +40,8 @@ variable "ssh_public_key_path" {
   default     = "~/.ssh/id_rsa.pub"
 }
 
-variable "fts_public_ip" {
-  description = "Public IP to bind FTS to (leave empty to auto-detect)"
+variable "ots_public_ip" {
+  description = "Public IP to bind OTS to (leave empty to auto-detect)"
   type        = string
   default     = ""
 }

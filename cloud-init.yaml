@@ -21,9 +21,9 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
-      exec > /var/log/ots-install.log 2>&1
+      exec > >(tee -a /var/log/ots-install.log) 2>&1
 
-      echo "=== OpenTAKServer Installation Started ==="
+      echo "=== OpenTAKServer Installation ==="
       echo "Timestamp: $(date -u)"
 
       PUBLIC_IP="${fts_public_ip}"
@@ -31,23 +31,243 @@ write_files:
         PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s http://ifconfig.me)
       fi
       echo "Using public IP: $PUBLIC_IP"
+      TAK_HOME="/home/tak"
 
-      # OTS installer must NOT run as root
-      # Download installer, patch out interactive prompts, then run it
-      curl https://i.opentakserver.io/ubuntu_installer -L -o /tmp/ots_installer.sh
-      # Auto-answer "no" to ZeroTier prompt
-      sed -i 's|read -p.*Install ZeroTier.*|INSTALL_ZEROTIER="n"|g' /tmp/ots_installer.sh
-      sed -i 's|< /dev/tty||g' /tmp/ots_installer.sh
-      chmod +x /tmp/ots_installer.sh
-      su - tak -c 'bash /tmp/ots_installer.sh 2>&1' | tee -a /var/log/ots-install.log
+      # ── 1. System packages ────────────────────────────────────────
+      echo ">>> Installing system packages..."
+      NEEDRESTART_MODE=a apt install -y \
+        curl python3 python3-pip python3-venv rabbitmq-server openssl \
+        nginx ffmpeg libnginx-mod-stream python3-dev \
+        postgresql-postgis pgloader
 
-      echo "=== OpenTAKServer Installation Complete ==="
+      # ── 2. Python venv + OTS from PyPI (as tak) ───────────────────
+      echo ">>> Installing OpenTAKServer from PyPI..."
+      su - tak -c '
+        python3 -m venv --system-site-packages ~/.opentakserver_venv
+        source ~/.opentakserver_venv/bin/activate
+        python3 -m pip install --upgrade pip setuptools wheel
+        pip3 install opentakserver
+        mkdir -p ~/ots
+        cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
+        flask ots generate-config
+      '
+
+      # ── 3. PostgreSQL database ────────────────────────────────────
+      echo ">>> Initializing database..."
+      OTS_USER_EXISTS=$(su postgres -c "psql -tXAc \"SELECT 1 from pg_roles WHERE rolname='ots'\"" || true)
+      OTS_DB_EXISTS=$(su postgres -c "psql -XtAc \"SELECT 1 FROM pg_database WHERE datname='ots'\"" || true)
+
+      if [ "$OTS_USER_EXISTS" != "1" ]; then
+        PG_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+        su postgres -c "psql -c \"create role ots with login password '$PG_PASS';\""
+        sed -i "s/POSTGRESQL_PASSWORD/$PG_PASS/g" $TAK_HOME/ots/config.yml
+      fi
+
+      if [ "$OTS_DB_EXISTS" != "1" ]; then
+        su postgres -c "psql -c 'create database ots;'"
+      fi
+
+      su postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE \"ots\" TO ots;'"
+      su postgres -c "psql -d ots -c 'GRANT ALL ON SCHEMA public TO ots;'"
+
+      su - tak -c '
+        source ~/.opentakserver_venv/bin/activate
+        cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
+        flask db upgrade
+      '
+      echo ">>> Database initialized."
+
+      # ── 4. Certificate authority ──────────────────────────────────
+      echo ">>> Creating certificate authority..."
+      su - tak -c '
+        mkdir -p ~/ots/ca
+        source ~/.opentakserver_venv/bin/activate
+        cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
+        flask ots create-ca
+      '
+
+      # ── 5. MediaMTX (video streaming) ────────────────────────────
+      echo ">>> Installing MediaMTX..."
+      su - tak -c '
+        source ~/.opentakserver_venv/bin/activate
+        mkdir -p ~/ots/mediamtx/recordings
+        cd ~/ots/mediamtx
+        ARCH=$(uname -m)
+        if [ "$ARCH" == "x86_64" ]; then
+          lastversion --filter "~*linux_amd64" --assets download bluenviron/mediamtx --only 1.13.0
+        else
+          lastversion --filter "~*linux_arm64" --assets download bluenviron/mediamtx --only 1.13.0
+        fi
+        tar -xf ./*.tar.gz
+        wget -q https://github.com/brian7704/OpenTAKServer-Installer/raw/master/mediamtx.yml -O ~/ots/mediamtx/mediamtx.yml
+        sed -i "s~SERVER_CERT_FILE~$HOME/ots/ca/certs/opentakserver/opentakserver.pem~g" ~/ots/mediamtx/mediamtx.yml
+        sed -i "s~SERVER_KEY_FILE~$HOME/ots/ca/certs/opentakserver/opentakserver.nopass.key~g" ~/ots/mediamtx/mediamtx.yml
+        sed -i "s~OTS_FOLDER~$HOME/ots~g" ~/ots/mediamtx/mediamtx.yml
+      '
+
+      cat > /etc/systemd/system/mediamtx.service <<EOF
+      [Unit]
+      Wants=network.target
+      [Service]
+      User=tak
+      ExecStart=$TAK_HOME/ots/mediamtx/mediamtx $TAK_HOME/ots/mediamtx/mediamtx.yml
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      systemctl daemon-reload
+      systemctl enable mediamtx
+      systemctl start mediamtx
+
+      # ── 6. Nginx ──────────────────────────────────────────────────
+      echo ">>> Configuring nginx..."
+      CERT="$TAK_HOME/ots/ca/certs/opentakserver/opentakserver.pem"
+      KEY="$TAK_HOME/ots/ca/certs/opentakserver/opentakserver.nopass.key"
+      CA="$TAK_HOME/ots/ca/ca.pem"
+
+      grep -q "stream {" /etc/nginx/nginx.conf || printf '\nstream {\n        include /etc/nginx/streams-enabled/*;\n}\n' >> /etc/nginx/nginx.conf
+
+      rm -f /etc/nginx/sites-enabled/default
+      mkdir -p /etc/nginx/streams-available /etc/nginx/streams-enabled
+
+      NGINX_RAW="https://raw.githubusercontent.com/brian7704/OpenTAKServer-Installer/refs/heads/master/nginx_configs"
+      wget -q "$NGINX_RAW/rabbitmq"                  -O /etc/nginx/streams-available/rabbitmq
+      wget -q "$NGINX_RAW/mediamtx"                   -O /etc/nginx/streams-available/mediamtx
+      wget -q "$NGINX_RAW/ots_certificate_enrollment" -O /etc/nginx/sites-available/ots_certificate_enrollment
+      wget -q "$NGINX_RAW/ots_http"                    -O /etc/nginx/sites-available/ots_http
+      wget -q "$NGINX_RAW/ots_https"                   -O /etc/nginx/sites-available/ots_https
+      wget -q "$NGINX_RAW/ots_8443" -O /etc/nginx/streams-available/ots_8443 2>/dev/null || true
+      wget -q "$NGINX_RAW/ots_8089" -O /etc/nginx/streams-available/ots_8089 2>/dev/null || true
+
+      for f in /etc/nginx/sites-available/ots_* /etc/nginx/streams-available/*; do
+        [ -f "$f" ] || continue
+        sed -i "s~SERVER_CERT_FILE~$CERT~g"              "$f"
+        sed -i "s~SERVER_KEY_FILE~$KEY~g"                "$f"
+        sed -i "s~CA_CERT_FILE~$CA~g"                   "$f"
+        sed -i "s~OTS_CA_FOLDER~$TAK_HOME/ots/ca~g"     "$f"
+      done
+
+      ln -sf /etc/nginx/sites-available/ots_* /etc/nginx/sites-enabled/
+      ln -sf /etc/nginx/streams-available/rabbitmq /etc/nginx/streams-enabled/
+      ln -sf /etc/nginx/streams-available/mediamtx /etc/nginx/streams-enabled/
+      [ -f /etc/nginx/streams-available/ots_8443 ] && ln -sf /etc/nginx/streams-available/ots_8443 /etc/nginx/streams-enabled/
+      [ -f /etc/nginx/streams-available/ots_8089 ] && ln -sf /etc/nginx/streams-available/ots_8089 /etc/nginx/streams-enabled/
+
+      systemctl enable nginx
+      systemctl restart nginx
+
+      # ── 7. Web UI ─────────────────────────────────────────────────
+      echo ">>> Installing OTS Web UI..."
+      mkdir -p /var/www/html/opentakserver
+      chmod a+rw /var/www/html/opentakserver
+      su - tak -c '
+        source ~/.opentakserver_venv/bin/activate
+        cd /var/www/html/opentakserver
+        lastversion --assets extract brian7704/OpenTAKServer-UI
+      '
+
+      # ── 8. Systemd services ──────────────────────────────────────
+      echo ">>> Creating systemd services..."
+      mkdir -p $TAK_HOME/ots/logs
+      chown -R tak:tak $TAK_HOME/ots
+
+      cat > /etc/systemd/system/opentakserver.service <<EOF
+      [Unit]
+      Wants=network.target rabbitmq-server.service
+      After=network.target rabbitmq-server.service
+      Requires=eud_handler eud_handler_ssl cot_parser
+      [Service]
+      User=tak
+      WorkingDirectory=$TAK_HOME/ots
+      ExecStart=$TAK_HOME/.opentakserver_venv/bin/opentakserver
+      Restart=on-failure
+      RestartSec=5s
+      StandardOutput=append:$TAK_HOME/ots/logs/opentakserver.log
+      StandardError=append:$TAK_HOME/ots/logs/opentakserver.log
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      cat > /etc/systemd/system/cot_parser.service <<EOF
+      [Unit]
+      Wants=network.target rabbitmq-server.service
+      After=network.target rabbitmq-server.service
+      PartOf=opentakserver.service
+      [Service]
+      User=tak
+      WorkingDirectory=$TAK_HOME/ots
+      ExecStart=$TAK_HOME/.opentakserver_venv/bin/cot_parser
+      Restart=on-failure
+      RestartSec=5s
+      StandardOutput=append:$TAK_HOME/ots/logs/opentakserver.log
+      StandardError=append:$TAK_HOME/ots/logs/opentakserver.log
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      cat > /etc/systemd/system/eud_handler.service <<EOF
+      [Unit]
+      Wants=network.target rabbitmq-server.service
+      After=network.target rabbitmq-server.service
+      PartOf=opentakserver.service
+      [Service]
+      User=tak
+      WorkingDirectory=$TAK_HOME/ots
+      ExecStart=$TAK_HOME/.opentakserver_venv/bin/eud_handler
+      Restart=on-failure
+      RestartSec=5s
+      StandardOutput=append:$TAK_HOME/ots/logs/opentakserver.log
+      StandardError=append:$TAK_HOME/ots/logs/opentakserver.log
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      cat > /etc/systemd/system/eud_handler_ssl.service <<EOF
+      [Unit]
+      Wants=network.target rabbitmq-server.service
+      After=network.target rabbitmq-server.service
+      PartOf=opentakserver.service
+      [Service]
+      User=tak
+      WorkingDirectory=$TAK_HOME/ots
+      ExecStart=$TAK_HOME/.opentakserver_venv/bin/eud_handler --ssl
+      Restart=on-failure
+      RestartSec=5s
+      StandardOutput=append:$TAK_HOME/ots/logs/opentakserver.log
+      StandardError=append:$TAK_HOME/ots/logs/opentakserver.log
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      systemctl daemon-reload
+      systemctl enable opentakserver cot_parser eud_handler eud_handler_ssl
+      systemctl start cot_parser eud_handler eud_handler_ssl
+      sleep 5
+      systemctl start opentakserver
+
+      # ── 9. RabbitMQ ───────────────────────────────────────────────
+      echo ">>> Configuring RabbitMQ..."
+      wget -q https://raw.githubusercontent.com/brian7704/OpenTAKServer-Installer/master/rabbitmq.conf -O /etc/rabbitmq/rabbitmq.conf
+      RMQVER=$(rabbitmqadmin --version 2>&1 | awk '{print $2}')
+      echo "PLUGINS_DIR=\"/usr/lib/rabbitmq/plugins:/usr/lib/rabbitmq/lib/rabbitmq_server-$RMQVER/plugins\"" >> /etc/rabbitmq/rabbitmq-env.conf
+      systemctl restart rabbitmq-server
+      rabbitmq-plugins enable rabbitmq_mqtt rabbitmq_auth_backend_http || true
+      systemctl restart rabbitmq-server
+
+      # ── Done ──────────────────────────────────────────────────────
+      echo ""
+      echo "========================================="
+      echo "  OpenTAKServer Installation Complete!"
+      echo "========================================="
       echo "Timestamp: $(date -u)"
       echo ""
-      echo "Web UI: https://$PUBLIC_IP"
-      echo "SSL CoT: $PUBLIC_IP:8089"
+      echo "Web UI:          https://$PUBLIC_IP"
+      echo "SSL CoT:         $PUBLIC_IP:8089"
       echo "Cert Enrollment: https://$PUBLIC_IP:8446"
-      echo "Truststore: https://$PUBLIC_IP/api/truststore"
+      echo "Truststore:      https://$PUBLIC_IP/api/truststore"
+      echo ""
+      echo "Default admin:   administrator / password"
+      echo "(Change the password after first login!)"
 
 runcmd:
   - bash /opt/install-ots.sh

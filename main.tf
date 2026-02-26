@@ -13,14 +13,14 @@ provider "digitalocean" {
   token = var.do_token
 }
 
-resource "digitalocean_ssh_key" "fts" {
+resource "digitalocean_ssh_key" "ots" {
   name       = var.ssh_key_name
   public_key = var.ssh_public_key != "" ? var.ssh_public_key : file(var.ssh_public_key_path)
 }
 
-resource "digitalocean_firewall" "fts" {
+resource "digitalocean_firewall" "ots" {
   name        = "${var.droplet_name}-fw"
-  droplet_ids = [digitalocean_droplet.fts.id]
+  droplet_ids = [digitalocean_droplet.ots.id]
 
   # SSH
   inbound_rule {
@@ -98,15 +98,15 @@ resource "digitalocean_firewall" "fts" {
   }
 }
 
-resource "digitalocean_droplet" "fts" {
+resource "digitalocean_droplet" "ots" {
   name     = var.droplet_name
   region   = var.region
   size     = var.droplet_size
   image    = "ubuntu-22-04-x64"
-  ssh_keys = [digitalocean_ssh_key.fts.fingerprint]
+  ssh_keys = [digitalocean_ssh_key.ots.fingerprint]
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    fts_public_ip = var.fts_public_ip
+    fts_public_ip = var.ots_public_ip
   })
 
   tags = ["opentakserver"]
