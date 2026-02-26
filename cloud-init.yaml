@@ -33,7 +33,13 @@ write_files:
       echo "Using public IP: $PUBLIC_IP"
 
       # OTS installer must NOT run as root
-      su - tak -c 'curl https://i.opentakserver.io/ubuntu_installer -L | bash - 2>&1' | tee -a /var/log/ots-install.log
+      # Download installer, patch out interactive prompts, then run it
+      curl https://i.opentakserver.io/ubuntu_installer -L -o /tmp/ots_installer.sh
+      # Auto-answer "no" to ZeroTier prompt
+      sed -i 's|read -p.*Install ZeroTier.*|INSTALL_ZEROTIER="n"|g' /tmp/ots_installer.sh
+      sed -i 's|< /dev/tty||g' /tmp/ots_installer.sh
+      chmod +x /tmp/ots_installer.sh
+      su - tak -c 'bash /tmp/ots_installer.sh 2>&1' | tee -a /var/log/ots-install.log
 
       echo "=== OpenTAKServer Installation Complete ==="
       echo "Timestamp: $(date -u)"
