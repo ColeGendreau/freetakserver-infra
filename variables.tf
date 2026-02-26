@@ -28,8 +28,14 @@ variable "ssh_key_name" {
   default     = "fts-key"
 }
 
+variable "ssh_public_key" {
+  description = "SSH public key content (used in CI, takes precedence over ssh_public_key_path)"
+  type        = string
+  default     = ""
+}
+
 variable "ssh_public_key_path" {
-  description = "Path to your SSH public key"
+  description = "Path to your SSH public key (used for local development)"
   type        = string
   default     = "~/.ssh/id_rsa.pub"
 }

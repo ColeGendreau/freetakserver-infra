@@ -15,7 +15,7 @@ provider "digitalocean" {
 
 resource "digitalocean_ssh_key" "fts" {
   name       = var.ssh_key_name
-  public_key = file(var.ssh_public_key_path)
+  public_key = var.ssh_public_key != "" ? var.ssh_public_key : file(var.ssh_public_key_path)
 }
 
 resource "digitalocean_firewall" "fts" {

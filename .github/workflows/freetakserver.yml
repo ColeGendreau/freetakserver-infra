@@ -1,0 +1,78 @@
+name: FreeTAKServer
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What do you want to do?"
+        required: true
+        type: choice
+        options:
+          - plan
+          - deploy
+          - destroy
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  TF_VAR_do_token: ${{ secrets.DO_TOKEN }}
+  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+  TF_INPUT: false
+
+jobs:
+  terraform:
+    name: "${{ inputs.action }} FreeTAKServer"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Restore Terraform State
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: terraform-state
+          search_artifacts: true
+          if_no_artifact_found: warn
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        if: inputs.action == 'plan'
+        run: terraform plan
+
+      - name: Terraform Apply
+        if: inputs.action == 'deploy'
+        run: terraform apply -auto-approve
+
+      - name: Terraform Destroy
+        if: inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
+
+      - name: Save Terraform State
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-state
+          path: |
+            terraform.tfstate
+            terraform.tfstate.backup
+          retention-days: 90
+          overwrite: true
+
+      - name: Show Outputs
+        if: inputs.action == 'deploy'
+        run: |
+          echo "## FreeTAKServer Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          terraform output >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
