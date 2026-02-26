@@ -29,14 +29,7 @@ resource "digitalocean_firewall" "fts" {
     source_addresses = ["0.0.0.0/0", "::/0"]
   }
 
-  # FTS CoT (plaintext)
-  inbound_rule {
-    protocol         = "tcp"
-    port_range       = "8087"
-    source_addresses = ["0.0.0.0/0", "::/0"]
-  }
-
-  # FTS CoT (SSL)
+  # FTS CoT (SSL only — plaintext 8087 is blocked)
   inbound_rule {
     protocol         = "tcp"
     port_range       = "8089"
