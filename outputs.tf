@@ -8,14 +8,9 @@ output "ssh_command" {
   value       = "ssh root@${digitalocean_droplet.fts.ipv4_address}"
 }
 
-output "fts_cot_url" {
-  description = "FreeTAKServer CoT endpoint (for ATAK clients)"
-  value       = "${digitalocean_droplet.fts.ipv4_address}:8087"
-}
-
 output "fts_ssl_cot_url" {
-  description = "FreeTAKServer SSL CoT endpoint"
-  value       = "${digitalocean_droplet.fts.ipv4_address}:8089"
+  description = "FreeTAKServer SSL CoT endpoint (for ATAK/iTAK clients)"
+  value       = "${digitalocean_droplet.fts.ipv4_address}:8443"
 }
 
 output "fts_api_url" {
@@ -41,6 +36,11 @@ output "fts_nodered_url" {
 output "fts_voice_server" {
   description = "Mumble voice server"
   value       = "${digitalocean_droplet.fts.ipv4_address}:64738"
+}
+
+output "data_package_command" {
+  description = "Command to download the iTAK/ATAK data package"
+  value       = "scp root@${digitalocean_droplet.fts.ipv4_address}:/opt/fts-datapackage/FTS-iTAK.zip ."
 }
 
 output "install_log_command" {

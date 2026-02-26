@@ -1,85 +1,92 @@
 # FreeTAKServer Infrastructure
 
-Terraform project to deploy [FreeTAKServer](https://freetakteam.github.io/FreeTAKServer-User-Docs/) on DigitalOcean.
+One-click deploy/destroy for [FreeTAKServer](https://freetakteam.github.io/FreeTAKServer-User-Docs/) on DigitalOcean via Terraform and GitHub Actions.
 
 ## What Gets Deployed
 
 - **Ubuntu 22.04** droplet (2 GB RAM, 1 vCPU) — ~$12/mo
-- **Firewall** with ports opened for all FTS services
+- **Firewall** with only necessary ports open (SSL-only, no plaintext CoT)
 - **FreeTAKServer 2.x** installed via the official Zero Touch Installer, including:
-  - FTS core (CoT on port 8087, SSL CoT on port 8089)
+  - FTS core — SSL CoT on port **8443**
   - FTS Web UI (port 5000)
   - REST API (port 19023)
   - WebMap (port 8000)
   - Node-RED integration server (port 1880)
   - Mumble voice server (port 64738)
   - Video server / MediaMTX (port 8554)
+- **Client data package** (`FTS-iTAK.zip`) auto-generated with SSL certs for iTAK/ATAK
 
-## Prerequisites
+## Fork & Deploy (GitHub Actions)
 
-1. [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.5
-2. A [DigitalOcean account](https://cloud.digitalocean.com/registrations/new) and [API token](https://cloud.digitalocean.com/account/api/tokens)
-3. An SSH key pair (`ssh-keygen -t ed25519` if you don't have one)
+The easiest way to use this repo — no local Terraform needed.
 
-## Quick Start
+### 1. Fork this repo
+
+Click **Fork** at the top of this page.
+
+### 2. Add your secrets
+
+In your fork, go to **Settings > Secrets and variables > Actions** and add:
+
+| Secret | Value |
+|--------|-------|
+| `DO_TOKEN` | Your [DigitalOcean API token](https://cloud.digitalocean.com/account/api/tokens) (read + write) |
+| `SSH_PUBLIC_KEY` | Contents of your SSH public key (`cat ~/.ssh/id_ed25519.pub`) |
+
+### 3. Deploy
+
+Go to **Actions > FreeTAKServer > Run workflow** and select **deploy**.
+
+### 4. Connect iTAK/ATAK
+
+Once the deploy finishes (~10-15 min for FTS to install after the droplet is up):
 
 ```bash
-# Clone and enter the directory
-cd freetakserver-infra
+# Download the auto-generated data package
+scp root@<DROPLET_IP>:/opt/fts-datapackage/FTS-iTAK.zip .
+```
 
-# Set up your variables
+Then transfer `FTS-iTAK.zip` to your phone and import it:
+- **iTAK**: Settings > Network > Servers > + > Upload Server Package
+- **ATAK**: Settings > Network Preferences > TAK Servers > Import
+
+Certificate password: `atakatak`
+
+### 5. Destroy
+
+Go to **Actions > FreeTAKServer > Run workflow** and select **destroy**.
+
+## Local CLI Deploy (Alternative)
+
+```bash
 cp terraform.tfvars.example terraform.tfvars
 # Edit terraform.tfvars with your DO token and SSH key path
 
-# Deploy
 terraform init
 terraform plan
 terraform apply
 
-# Check installation progress (takes ~10-15 min after droplet is up)
+# Watch install progress
 ssh root@$(terraform output -raw droplet_ip) 'tail -f /var/log/fts-install.log'
-```
 
-## Connecting ATAK/iTAK
-
-After installation completes (~10-15 minutes after the droplet is running):
-
-1. Open ATAK/iTAK
-2. Go to Settings > Network Preferences > TAK Servers
-3. Add a new server:
-   - **Host**: `<droplet_ip>` (from `terraform output droplet_ip`)
-   - **Port**: `8087` (plaintext) or `8089` (SSL)
-   - **Protocol**: TCP
-
-## Useful Commands
-
-```bash
-# See all outputs (IPs, URLs, etc.)
-terraform output
-
-# SSH into the server
-ssh root@$(terraform output -raw droplet_ip)
-
-# Check FTS service status
-ssh root@$(terraform output -raw droplet_ip) 'systemctl status fts'
-
-# Tear everything down
-terraform destroy
+# Download client data package when install completes
+scp root@$(terraform output -raw droplet_ip):/opt/fts-datapackage/FTS-iTAK.zip .
 ```
 
 ## Ports Reference
 
-| Service | Port | Protocol |
-|---------|------|----------|
-| SSH | 22 | TCP |
-| CoT (plaintext) | 8087 | TCP |
-| CoT (SSL) | 8089 | TCP |
-| REST API | 19023 | TCP |
-| Web UI | 5000 | TCP |
-| WebMap | 8000 | TCP |
-| Node-RED | 1880 | TCP |
-| Mumble Voice | 64738 | TCP/UDP |
-| Video (RTSP) | 8554 | TCP |
+| Service | Port | Protocol | Auth |
+|---------|------|----------|------|
+| SSH | 22 | TCP | SSH key |
+| CoT (SSL) | 8443 | TCP | Client certificate |
+| REST API | 19023 | TCP | — |
+| Web UI | 5000 | TCP | Account signup |
+| WebMap | 8000 | TCP | — |
+| Node-RED | 1880 | TCP | Token |
+| Mumble Voice | 64738 | TCP/UDP | — |
+| Video (RTSP) | 8554 | TCP | — |
+
+> Plaintext CoT (8080) is **not exposed** in the firewall. All TAK client connections require SSL + client certificates.
 
 ## Cost
 
@@ -87,7 +94,7 @@ DigitalOcean `s-1vcpu-2gb` droplet: **$12/month** (2 GB RAM, 1 vCPU, 50 GB SSD, 
 
 ### Cheaper Alternatives
 
-If you want to reduce cost, these providers have Terraform support:
+These providers also have Terraform support if you want to adapt this project:
 
 | Provider | Plan | RAM | Price | Terraform Provider |
 |----------|------|-----|-------|--------------------|
@@ -100,4 +107,4 @@ If you want to reduce cost, these providers have Terraform support:
 terraform destroy
 ```
 
-This removes the droplet, firewall, and SSH key from DigitalOcean. Your local SSH keys and Terraform state are preserved.
+Or use the GitHub Actions **destroy** workflow for one-click teardown.
