@@ -106,7 +106,7 @@ resource "digitalocean_droplet" "ots" {
   ssh_keys = [digitalocean_ssh_key.ots.fingerprint]
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    fts_public_ip = var.ots_public_ip
+    ots_public_ip = var.ots_public_ip
   })
 
   tags = ["opentakserver"]

@@ -26,7 +26,7 @@ write_files:
       echo "=== OpenTAKServer Installation ==="
       echo "Timestamp: $(date -u)"
 
-      PUBLIC_IP="${fts_public_ip}"
+      PUBLIC_IP="${ots_public_ip}"
       if [ -z "$PUBLIC_IP" ]; then
         PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s http://ifconfig.me)
       fi
@@ -166,7 +166,99 @@ write_files:
         lastversion --assets extract brian7704/OpenTAKServer-UI
       '
 
-      # ── 8. Systemd services ──────────────────────────────────────
+      # ── 8. RabbitMQ (must be configured before OTS services start) ─
+      echo ">>> Configuring RabbitMQ..."
+      wget -q https://raw.githubusercontent.com/brian7704/OpenTAKServer-Installer/master/rabbitmq.conf -O /etc/rabbitmq/rabbitmq.conf
+      RMQVER=$(dpkg -l | grep rabbitmq-server | awk '{print $3}' | cut -d- -f1)
+      echo "PLUGINS_DIR=\"/usr/lib/rabbitmq/plugins:/usr/lib/rabbitmq/lib/rabbitmq_server-$RMQVER/plugins\"" >> /etc/rabbitmq/rabbitmq-env.conf
+      rabbitmq-plugins enable rabbitmq_mqtt rabbitmq_auth_backend_http || true
+      systemctl restart rabbitmq-server
+      sleep 3
+
+      # ── 9. Patch: route RabbitMQ messages through callsign queues ─
+      # The upstream eud_handler binds group/mission exchanges to UID-based queues
+      # but pika's SelectConnection basic_consume silently fails to register
+      # consumers on those queues due to async threading. This patch routes all
+      # exchange bindings through callsign-based queues which do get consumers.
+      echo ">>> Applying callsign queue routing patch..."
+      CCPY=$(find $TAK_HOME/.opentakserver_venv -name "client_controller.py" -path "*/eud_handler/*")
+      if [ -f "$CCPY" ]; then
+        cp "$CCPY" "${CCPY}.orig"
+        python3 << 'PATCH_EOF'
+import sys
+
+ccpy_paths = __import__("subprocess").check_output(
+    ["find", "/home/tak/.opentakserver_venv", "-name", "client_controller.py", "-path", "*/eud_handler/*"],
+    text=True
+).strip().split("\n")
+
+for ccpy in ccpy_paths:
+    if not ccpy:
+        continue
+    with open(ccpy, "r") as f:
+        c = f.read()
+
+    # Remove queue_declare for self.uid (keep only callsign)
+    c = c.replace(
+        "self.rabbit_channel.queue_declare(queue=self.callsign)\n"
+        "                    self.rabbit_channel.queue_declare(queue=self.uid)",
+        "self.rabbit_channel.queue_declare(queue=self.callsign)"
+    )
+
+    # Route groups exchange bindings to callsign queue instead of UID queue
+    c = c.replace('exchange="groups", queue=self.uid,', 'exchange="groups", queue=self.callsign,')
+    c = c.replace(
+        'exchange="groups",\n                                        queue=self.uid,',
+        'exchange="groups",\n                                        queue=self.callsign,'
+    )
+
+    # Route missions exchange binding to callsign queue
+    c = c.replace(
+        'exchange="missions", routing_key="missions", queue=self.uid',
+        'exchange="missions", routing_key="missions", queue=self.callsign'
+    )
+
+    # Route DMS UID binding to callsign queue (keep UID as routing key)
+    c = c.replace(
+        'exchange="dms", queue=self.uid, routing_key=self.uid',
+        'exchange="dms", queue=self.callsign, routing_key=self.uid'
+    )
+
+    # Remove basic_consume on UID queue (keep only callsign consumer)
+    c = c.replace(
+        "self.rabbit_channel.basic_consume(\n"
+        "                            queue=self.callsign, on_message_callback=self.on_message, auto_ack=True\n"
+        "                        )\n"
+        "                        self.rabbit_channel.basic_consume(\n"
+        "                            queue=self.uid, on_message_callback=self.on_message, auto_ack=True\n"
+        "                        )",
+        "self.rabbit_channel.basic_consume(\n"
+        "                            queue=self.callsign, on_message_callback=self.on_message, auto_ack=True\n"
+        "                        )"
+    )
+
+    with open(ccpy, "w") as f:
+        f.write(c)
+    print(f"Patched: {ccpy}")
+PATCH_EOF
+      fi
+
+      # ── 10. Seed default group memberships ───────────────────────
+      # Users added via the Web UI only get IN direction entries. The eud_handler
+      # needs OUT entries for queue binding, and route_cot needs IN entries for
+      # message publishing. Seed both directions for the __ANON__ default group.
+      echo ">>> Seeding default group directions..."
+      su postgres -c "psql -d ots -c \"
+        INSERT INTO groups_users (user_id, group_id, direction, enabled)
+        SELECT u.id, g.id, d.dir, true
+        FROM \"user\" u
+        CROSS JOIN groups g
+        CROSS JOIN (VALUES ('IN'), ('OUT')) AS d(dir)
+        WHERE g.name = '__ANON__'
+        ON CONFLICT DO NOTHING;
+      \"" || true
+
+      # ── 11. Systemd services ─────────────────────────────────────
       echo ">>> Creating systemd services..."
       mkdir -p $TAK_HOME/ots/logs
       chown -R tak:tak $TAK_HOME/ots
@@ -245,14 +337,23 @@ write_files:
       sleep 5
       systemctl start opentakserver
 
-      # ── 9. RabbitMQ ───────────────────────────────────────────────
-      echo ">>> Configuring RabbitMQ..."
-      wget -q https://raw.githubusercontent.com/brian7704/OpenTAKServer-Installer/master/rabbitmq.conf -O /etc/rabbitmq/rabbitmq.conf
-      RMQVER=$(rabbitmqadmin --version 2>&1 | awk '{print $2}')
-      echo "PLUGINS_DIR=\"/usr/lib/rabbitmq/plugins:/usr/lib/rabbitmq/lib/rabbitmq_server-$RMQVER/plugins\"" >> /etc/rabbitmq/rabbitmq-env.conf
-      systemctl restart rabbitmq-server
-      rabbitmq-plugins enable rabbitmq_mqtt rabbitmq_auth_backend_http || true
-      systemctl restart rabbitmq-server
+      # ── 12. Health check watchdog ─────────────────────────────────
+      echo ">>> Setting up health check watchdog..."
+      cat > /opt/ots-healthcheck.sh << 'HEALTHCHECK'
+      #!/bin/bash
+      if ! timeout 5 bash -c 'echo | openssl s_client -connect 127.0.0.1:8089 2>/dev/null | grep -q "CONNECTED"'; then
+        echo "$(date -u) - eud_handler_ssl not responding, restarting..." >> /var/log/ots-healthcheck.log
+        systemctl restart eud_handler_ssl
+        sleep 3
+        if timeout 5 bash -c 'echo | openssl s_client -connect 127.0.0.1:8089 2>/dev/null | grep -q "CONNECTED"'; then
+          echo "$(date -u) - eud_handler_ssl recovered after restart" >> /var/log/ots-healthcheck.log
+        else
+          echo "$(date -u) - eud_handler_ssl STILL NOT RESPONDING after restart" >> /var/log/ots-healthcheck.log
+        fi
+      fi
+      HEALTHCHECK
+      chmod +x /opt/ots-healthcheck.sh
+      (crontab -l 2>/dev/null; echo "*/5 * * * * /opt/ots-healthcheck.sh") | crontab -
 
       # ── Done ──────────────────────────────────────────────────────
       echo ""
