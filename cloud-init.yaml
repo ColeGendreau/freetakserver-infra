@@ -33,6 +33,44 @@ write_files:
       echo "Using public IP: $PUBLIC_IP"
       TAK_HOME="/home/tak"
 
+      # ── 0. Mount persistent volume ──────────────────────────────
+      VOLUME_DEV="/dev/disk/by-id/scsi-0DO_Volume_ots-data"
+      MOUNT_POINT="/mnt/ots-data"
+      echo ">>> Waiting for persistent volume..."
+      for i in $(seq 1 30); do
+        [ -e "$VOLUME_DEV" ] && break
+        echo "  waiting for volume device ($i/30)..."
+        sleep 2
+      done
+
+      if [ -e "$VOLUME_DEV" ]; then
+        mkdir -p "$MOUNT_POINT"
+        mount -o defaults,nofail "$VOLUME_DEV" "$MOUNT_POINT"
+        grep -q "ots-data" /etc/fstab || echo "$VOLUME_DEV $MOUNT_POINT ext4 defaults,nofail 0 2" >> /etc/fstab
+        echo ">>> Volume mounted at $MOUNT_POINT"
+      else
+        echo ">>> WARNING: Persistent volume not found. Data will not survive destroy/redeploy."
+        MOUNT_POINT=""
+      fi
+
+      EXISTING_DATA=false
+      if [ -n "$MOUNT_POINT" ] && [ -d "$MOUNT_POINT/ca" ]; then
+        EXISTING_DATA=true
+        echo ">>> Existing data detected on volume — this is a REDEPLOY"
+      else
+        echo ">>> No existing data — this is a FRESH DEPLOY"
+      fi
+
+      # ── 0.5. Create swap file ────────────────────────────────────
+      if [ ! -f /swapfile ]; then
+        echo ">>> Creating 2 GB swap file..."
+        fallocate -l 2G /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+      fi
+
       # ── 1. System packages ────────────────────────────────────────
       echo ">>> Installing system packages..."
       NEEDRESTART_MODE=a apt install -y \
@@ -42,6 +80,14 @@ write_files:
 
       # ── 2. Python venv + OTS from PyPI (as tak) ───────────────────
       echo ">>> Installing OpenTAKServer from PyPI..."
+
+      if [ "$EXISTING_DATA" = "true" ]; then
+        echo ">>> Restoring config from volume before OTS install..."
+        mkdir -p $TAK_HOME/ots
+        cp "$MOUNT_POINT/config.yml" $TAK_HOME/ots/config.yml
+        chown -R tak:tak $TAK_HOME/ots
+      fi
+
       su - tak -c '
         python3 -m venv --system-site-packages ~/.opentakserver_venv
         source ~/.opentakserver_venv/bin/activate
@@ -54,37 +100,64 @@ write_files:
 
       # ── 3. PostgreSQL database ────────────────────────────────────
       echo ">>> Initializing database..."
-      OTS_USER_EXISTS=$(su postgres -c "psql -tXAc \"SELECT 1 from pg_roles WHERE rolname='ots'\"" || true)
-      OTS_DB_EXISTS=$(su postgres -c "psql -XtAc \"SELECT 1 FROM pg_database WHERE datname='ots'\"" || true)
 
-      if [ "$OTS_USER_EXISTS" != "1" ]; then
-        PG_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
-        su postgres -c "psql -c \"create role ots with login password '$PG_PASS';\""
-        sed -i "s/POSTGRESQL_PASSWORD/$PG_PASS/g" $TAK_HOME/ots/config.yml
+      if [ "$EXISTING_DATA" = "true" ]; then
+        echo ">>> Restoring database from volume..."
+        PG_PASS=$(grep -oP 'SQLALCHEMY_DATABASE_URI.*password=\K[^&"]+' $TAK_HOME/ots/config.yml || grep -oP '://ots:\K[^@]+' $TAK_HOME/ots/config.yml)
+
+        OTS_USER_EXISTS=$(su postgres -c "psql -tXAc \"SELECT 1 from pg_roles WHERE rolname='ots'\"" || true)
+        if [ "$OTS_USER_EXISTS" != "1" ]; then
+          su postgres -c "psql -c \"create role ots with login password '$PG_PASS';\""
+        fi
+
+        OTS_DB_EXISTS=$(su postgres -c "psql -XtAc \"SELECT 1 FROM pg_database WHERE datname='ots'\"" || true)
+        if [ "$OTS_DB_EXISTS" != "1" ]; then
+          su postgres -c "psql -c 'create database ots;'"
+        fi
+
+        su postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE \"ots\" TO ots;'"
+        su postgres -c "psql -d ots -c 'GRANT ALL ON SCHEMA public TO ots;'"
+        su postgres -c "pg_restore -d ots --clean --if-exists '$MOUNT_POINT/ots-database.dump'" || true
+        echo ">>> Database restored from volume."
+      else
+        OTS_USER_EXISTS=$(su postgres -c "psql -tXAc \"SELECT 1 from pg_roles WHERE rolname='ots'\"" || true)
+        OTS_DB_EXISTS=$(su postgres -c "psql -XtAc \"SELECT 1 FROM pg_database WHERE datname='ots'\"" || true)
+
+        if [ "$OTS_USER_EXISTS" != "1" ]; then
+          PG_PASS=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 20)
+          su postgres -c "psql -c \"create role ots with login password '$PG_PASS';\""
+          sed -i "s/POSTGRESQL_PASSWORD/$PG_PASS/g" $TAK_HOME/ots/config.yml
+        fi
+
+        if [ "$OTS_DB_EXISTS" != "1" ]; then
+          su postgres -c "psql -c 'create database ots;'"
+        fi
+
+        su postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE \"ots\" TO ots;'"
+        su postgres -c "psql -d ots -c 'GRANT ALL ON SCHEMA public TO ots;'"
+
+        su - tak -c '
+          source ~/.opentakserver_venv/bin/activate
+          cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
+          flask db upgrade
+        '
+        echo ">>> Database initialized."
       fi
-
-      if [ "$OTS_DB_EXISTS" != "1" ]; then
-        su postgres -c "psql -c 'create database ots;'"
-      fi
-
-      su postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE \"ots\" TO ots;'"
-      su postgres -c "psql -d ots -c 'GRANT ALL ON SCHEMA public TO ots;'"
-
-      su - tak -c '
-        source ~/.opentakserver_venv/bin/activate
-        cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
-        flask db upgrade
-      '
-      echo ">>> Database initialized."
 
       # ── 4. Certificate authority ──────────────────────────────────
-      echo ">>> Creating certificate authority..."
-      su - tak -c '
-        mkdir -p ~/ots/ca
-        source ~/.opentakserver_venv/bin/activate
-        cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
-        flask ots create-ca
-      '
+      if [ "$EXISTING_DATA" = "true" ]; then
+        echo ">>> Restoring CA and certificates from volume..."
+        cp -a "$MOUNT_POINT/ca" $TAK_HOME/ots/ca
+        chown -R tak:tak $TAK_HOME/ots/ca
+      else
+        echo ">>> Creating certificate authority..."
+        su - tak -c '
+          mkdir -p ~/ots/ca
+          source ~/.opentakserver_venv/bin/activate
+          cd ~/.opentakserver_venv/lib/python3.*/site-packages/opentakserver
+          flask ots create-ca
+        '
+      fi
 
       # ── 5. MediaMTX (video streaming) ────────────────────────────
       echo ">>> Installing MediaMTX..."
@@ -354,6 +427,26 @@ PATCH_EOF
       HEALTHCHECK
       chmod +x /opt/ots-healthcheck.sh
       (crontab -l 2>/dev/null; echo "*/5 * * * * /opt/ots-healthcheck.sh") | crontab -
+
+      # ── 13. Sync data to persistent volume ─────────────────────
+      if [ -n "$MOUNT_POINT" ]; then
+        echo ">>> Syncing data to persistent volume..."
+        cp -a $TAK_HOME/ots/ca "$MOUNT_POINT/"
+        cp $TAK_HOME/ots/config.yml "$MOUNT_POINT/"
+        su postgres -c "pg_dump -Fc ots" > "$MOUNT_POINT/ots-database.dump"
+        echo ">>> Volume sync complete."
+
+        echo ">>> Setting up hourly database backup to volume..."
+        cat > /opt/ots-volume-backup.sh << VOLBACKUP
+      #!/bin/bash
+      su postgres -c "pg_dump -Fc ots" > $MOUNT_POINT/ots-database.dump.tmp && \
+        mv $MOUNT_POINT/ots-database.dump.tmp $MOUNT_POINT/ots-database.dump
+      rsync -a --delete $TAK_HOME/ots/ca/ $MOUNT_POINT/ca/
+      cp $TAK_HOME/ots/config.yml $MOUNT_POINT/config.yml
+      VOLBACKUP
+        chmod +x /opt/ots-volume-backup.sh
+        (crontab -l 2>/dev/null; echo "0 * * * * /opt/ots-volume-backup.sh") | crontab -
+      fi
 
       # ── Done ──────────────────────────────────────────────────────
       echo ""

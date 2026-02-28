@@ -98,12 +98,25 @@ resource "digitalocean_firewall" "ots" {
   }
 }
 
+resource "digitalocean_volume" "ots_data" {
+  region                  = var.region
+  name                    = "ots-data"
+  size                    = 10
+  initial_filesystem_type = "ext4"
+  description             = "Persistent storage for OTS certificates, config, and database backups"
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "digitalocean_droplet" "ots" {
-  name     = var.droplet_name
-  region   = var.region
-  size     = var.droplet_size
-  image    = "ubuntu-22-04-x64"
-  ssh_keys = [digitalocean_ssh_key.ots.fingerprint]
+  name       = var.droplet_name
+  region     = var.region
+  size       = var.droplet_size
+  image      = "ubuntu-22-04-x64"
+  ssh_keys   = [digitalocean_ssh_key.ots.fingerprint]
+  volume_ids = [digitalocean_volume.ots_data.id]
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
     ots_public_ip = var.ots_public_ip

@@ -55,7 +55,11 @@ jobs:
 
       - name: Terraform Destroy
         if: inputs.action == 'destroy'
-        run: terraform destroy -auto-approve
+        run: |
+          terraform destroy -auto-approve \
+            -target=digitalocean_droplet.ots \
+            -target=digitalocean_firewall.ots \
+            -target=digitalocean_ssh_key.ots
 
       - name: Save Terraform State
         if: always()

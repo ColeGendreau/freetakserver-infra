@@ -11,5 +11,8 @@ crash.*.log
 terraform.tfvars
 *.auto.tfvars
 
+# Backups (contain certs and database dumps)
+backups/
+
 # OS
 .DS_Store
